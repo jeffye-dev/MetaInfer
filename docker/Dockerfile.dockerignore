@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+venv
+env
+**/__pycache__
+**/*.pyc
+**/*.egg-info
+build
+dist
+.metainfer
+state
+iterations
+nodes
+.vscode
+.idea
+**/.DS_Store
