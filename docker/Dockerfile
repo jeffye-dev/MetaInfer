@@ -1,23 +1,39 @@
-# MetaInfer runtime image: MetaInfer WebUI/orchestrator + coding agent CLIs
-# (Claude Code, claude-code-best/ccb, Codex).
+# MetaInfer runtime image: CUDA toolkit + PyTorch + MetaInfer, plus the coding
+# agent CLIs it drives (Claude Code, claude-code-best/ccb, Codex).
 #
 # Build (context = repo root):
 #   docker build -f docker/Dockerfile -t metainfer:latest .
 #
+# CUDA 13 needs NVIDIA driver >= 580. On older drivers pick a CUDA 12.x that
+# PyTorch ships wheels for (torch 2.13.0: cu126 / cu129), e.g.:
+#   docker build -f docker/Dockerfile --build-arg CUDA_VERSION=12.9.1 -t metainfer:cu129 .
+#
 # Run:
-#   docker run --rm -it -p 8765:8765 \
+#   docker run --rm -it --gpus all -p 8765:8765 \
 #     -v $PWD/data:/workspace/metainfer \
 #     -v ~/.claude:/root/.claude \
 #     -v ~/.codex:/root/.codex \
 #     -e METAINFER_AGENT_BACKEND=claude \
 #     metainfer:latest
 
-FROM ubuntu:24.04
+ARG CUDA_VERSION=13.0.3
+# devel (not base/runtime): agents compile CUDA kernels and extensions with
+# nvcc. Parameterized so a private registry mirror can be substituted.
+ARG BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
+
+FROM ${BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG TARGETARCH
+ARG CUDA_VERSION
 
 # Pinned tool versions; override with --build-arg when upgrading.
+ARG PYTHON_VERSION=3.12
+# The torch wheel comes from ${PYTORCH_CUDA_INDEX_BASE_URL}/cu<major><minor>
+# derived from CUDA_VERSION, so that pair must exist on the PyTorch index.
+ARG TORCH_VERSION=2.13.0
+ARG PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
+ARG UV_VERSION=0.12.23
 ARG NODE_VERSION=24.22.0
 ARG BUN_VERSION=1.4.3
 ARG CLAUDE_CODE_VERSION=2.1.301
@@ -38,16 +54,39 @@ RUN apt-get update \
         ninja-build \
         openssh-client \
         procps \
-        python3 \
-        python3-dev \
-        python3-pip \
-        python3-venv \
         ripgrep \
         tini \
         unzip \
         vim-tiny \
         xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# Python ${PYTHON_VERSION} via uv (Ubuntu 22.04 only ships 3.10). uv, its
+# managed CPython and the venv all live under /opt, independent of $HOME.
+ENV UV_INSTALL_DIR=/opt/uv/bin \
+    UV_PYTHON_INSTALL_DIR=/opt/uv/python \
+    UV_CACHE_DIR=/opt/uv/cache \
+    UV_HTTP_TIMEOUT=500 \
+    VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:/opt/uv/bin:/root/.local/bin:${PATH}
+RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | env UV_NO_MODIFY_PATH=1 sh \
+    && uv venv --seed --python "${PYTHON_VERSION}" /opt/venv \
+    && python --version \
+    && python -m pip --version
+# Only after `uv venv` (which hardlinks back to the managed CPython): copy
+# mode avoids hardlink failures across BuildKit cache mounts.
+ENV UV_LINK_MODE=copy
+
+# PyTorch built for this image's CUDA (13.0.3 -> cu130). Only the PyTorch
+# index is used so PyPI's default-CUDA torch can never win resolution, and
+# the build fails if torch's CUDA doesn't match the image. Installed before
+# MetaInfer is copied so code changes keep this ~3GB layer cached.
+RUN --mount=type=cache,target=/opt/uv/cache \
+    cuda_mm=$(echo "${CUDA_VERSION}" | cut -d. -f1,2) \
+    && uv pip install --python /opt/venv/bin/python \
+        --index-url "${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo "${cuda_mm}" | tr -d .)" \
+        "torch==${TORCH_VERSION}" numpy \
+    && python -c "import sys, torch; v = torch.version.cuda; print('torch', torch.__version__, 'CUDA', v); sys.exit(0 if v == sys.argv[1] else f'torch CUDA {v} != image CUDA {sys.argv[1]}')" "${cuda_mm}"
 
 # Node.js from the official release tarball (ccb / Claude Code / Codex are
 # distributed via npm).
@@ -75,13 +114,15 @@ RUN npm install --global --no-fund --no-audit \
     && ccb --version \
     && codex --version
 
-# MetaInfer itself, installed into a dedicated venv so the console scripts
-# (metainfer-web, metainfer-orchestrator) are on PATH.
+# MetaInfer itself, editable in /opt/venv so the console scripts
+# (metainfer-web, metainfer-orchestrator) are on PATH. The import check runs
+# against a throwaway METAINFER_ROOT so it leaves no nodes/ dir in the image.
 COPY . /opt/MetaInfer
-RUN python3 -m venv /opt/metainfer-venv \
-    && /opt/metainfer-venv/bin/pip install --no-cache-dir --upgrade pip \
-    && /opt/metainfer-venv/bin/pip install --no-cache-dir -e /opt/MetaInfer \
-    && /opt/metainfer-venv/bin/python -c "import metainfer.server.app"
+RUN --mount=type=cache,target=/opt/uv/cache \
+    uv pip install --python /opt/venv/bin/python -e /opt/MetaInfer \
+    && tmp_root=$(mktemp -d) \
+    && METAINFER_ROOT="${tmp_root}" python -c "import metainfer.server.app" \
+    && rm -rf "${tmp_root}"
 
 RUN mkdir -p \
         /root/.claude \
@@ -105,7 +146,6 @@ ENV HOME=/root \
     XDG_DATA_HOME=/root/.local/share \
     XDG_STATE_HOME=/root/.local/state \
     XDG_CACHE_HOME=/tmp/cache \
-    PATH=/opt/metainfer-venv/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     METAINFER_ROOT=/workspace/metainfer \
