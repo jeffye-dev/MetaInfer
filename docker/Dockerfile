@@ -61,6 +61,11 @@ RUN apt-get update \
         xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
+# PyPI mirror for every uv install below except torch (which pins its own
+# --index-url). Build-time only, never baked into the image env:
+#   --build-arg UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG UV_INDEX_URL
+
 # Python ${PYTHON_VERSION} via uv (Ubuntu 22.04 only ships 3.10). uv, its
 # managed CPython and the venv all live under /opt, independent of $HOME.
 ENV UV_INSTALL_DIR=/opt/uv/bin \

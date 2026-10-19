@@ -12,6 +12,8 @@ dist
 state
 iterations
 nodes
+# Conventional METAINFER_ROOT bind mount from `docker run -v $PWD/data:...`
+data
 .vscode
 .idea
 **/.DS_Store
