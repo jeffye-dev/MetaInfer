@@ -7,8 +7,8 @@
 # Run:
 #   docker run --rm -it -p 8765:8765 \
 #     -v $PWD/data:/workspace/metainfer \
-#     -v ~/.claude:/home/agent/.claude \
-#     -v ~/.codex:/home/agent/.codex \
+#     -v ~/.claude:/root/.claude \
+#     -v ~/.codex:/root/.codex \
 #     -e METAINFER_AGENT_BACKEND=claude \
 #     metainfer:latest
 
@@ -24,12 +24,6 @@ ARG CLAUDE_CODE_VERSION=2.1.301
 ARG CLAUDE_CODE_BEST_VERSION=2.8.4
 ARG CODEX_VERSION=0.163.0
 
-# Non-root runtime user. Claude Code refuses bypassPermissions (the
-# MetaInfer default) when running as root.
-ARG AGENT_USER=agent
-ARG AGENT_UID=1000
-ARG AGENT_GID=1000
-
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         bash \
@@ -40,6 +34,7 @@ RUN apt-get update \
         git \
         jq \
         less \
+        vim \
         ninja-build \
         openssh-client \
         procps \
@@ -88,31 +83,29 @@ RUN python3 -m venv /opt/metainfer-venv \
     && /opt/metainfer-venv/bin/pip install --no-cache-dir -e /opt/MetaInfer \
     && /opt/metainfer-venv/bin/python -c "import metainfer.server.app"
 
-# Replace the stock "ubuntu" user (uid 1000) with the agent user.
-RUN if id -u ubuntu >/dev/null 2>&1; then userdel --remove ubuntu; fi \
-    && groupadd --gid "${AGENT_GID}" "${AGENT_USER}" \
-    && useradd --uid "${AGENT_UID}" --gid "${AGENT_GID}" \
-        --create-home --home-dir /home/agent --shell /bin/bash "${AGENT_USER}" \
-    && mkdir -p \
-        /home/agent/.claude \
-        /home/agent/.codex \
-        /home/agent/.config \
-        /home/agent/.local/share \
-        /home/agent/.local/state \
-        /workspace/metainfer \
-    && chown -R "${AGENT_UID}:${AGENT_GID}" /home/agent /workspace /opt/MetaInfer
+RUN mkdir -p \
+        /root/.claude \
+        /root/.codex \
+        /root/.config \
+        /root/.local/share \
+        /root/.local/state \
+        /workspace/metainfer
 
 COPY docker/entrypoint.sh /usr/local/bin/metainfer-entrypoint
 RUN chmod 0755 /usr/local/bin/metainfer-entrypoint
 
-ENV HOME=/home/agent \
-    CODEX_HOME=/home/agent/.codex \
-    CLAUDE_CONFIG_DIR=/home/agent/.claude \
-    XDG_CONFIG_HOME=/home/agent/.config \
-    XDG_DATA_HOME=/home/agent/.local/share \
-    XDG_STATE_HOME=/home/agent/.local/state \
+# Runs as root. Claude Code / ccb refuse bypassPermissions (the MetaInfer
+# default) as root unless IS_SANDBOX=1, which marks the container as the
+# sandbox boundary.
+ENV HOME=/root \
+    IS_SANDBOX=1 \
+    CODEX_HOME=/root/.codex \
+    CLAUDE_CONFIG_DIR=/root/.claude \
+    XDG_CONFIG_HOME=/root/.config \
+    XDG_DATA_HOME=/root/.local/share \
+    XDG_STATE_HOME=/root/.local/state \
     XDG_CACHE_HOME=/tmp/cache \
-    PATH=/opt/metainfer-venv/bin:/home/agent/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PATH=/opt/metainfer-venv/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     METAINFER_ROOT=/workspace/metainfer \
@@ -123,7 +116,7 @@ ENV HOME=/home/agent \
     METAINFER_CLAUDE_BIN=ccb \
     METAINFER_CODEX_BIN=codex
 
-USER ${AGENT_USER}
+USER root
 WORKDIR /workspace/metainfer
 VOLUME ["/workspace/metainfer"]
 EXPOSE 8765
